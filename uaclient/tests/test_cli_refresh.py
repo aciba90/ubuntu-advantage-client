@@ -10,15 +10,18 @@ usage: ua refresh [contract|config] [flags]
 Refresh existing Ubuntu Advantage contract and update services.
 
 positional arguments:
-  {contract,config}  Target to refresh. `ua refresh contract` will update
-                     contract details from the server and perform any updates
-                     necessary. `ua refresh config` will reload /etc/ubuntu-
-                     advantage/uaclient.conf and perform any changes
-                     necessary. `ua refresh` is the equivalent of `ua refresh
-                     config && ua refresh contract`.
+  {contract,config,motd}
+                        Target to refresh. `ua refresh contract` will update
+                        contract details from the server and perform any
+                        updates necessary. `ua refresh config` will reload
+                        /etc/ubuntu-advantage/uaclient.conf and perform any
+                        changes necessary. `ua refresh motd` will refresh the
+                        MOTD messages associated with UA. `ua refresh` is the
+                        equivalent of `ua refresh config && ua refresh
+                        contract && ua refresh motd`.
 
 Flags:
-  -h, --help         show this help message and exit
+  -h, --help            show this help message and exit
 """
 
 
@@ -30,7 +33,8 @@ class TestActionRefresh:
             with mock.patch("sys.argv", ["/usr/bin/ua", "refresh", "--help"]):
                 main()
         out, _err = capsys.readouterr()
-        assert HELP_OUTPUT == out
+        print(out)
+        assert HELP_OUTPUT in out
 
     def test_non_root_users_are_rejected(self, getuid, FakeConfig):
         """Check that a UID != 0 will receive a message and exit non-zero"""
@@ -105,6 +109,47 @@ class TestActionRefresh:
         assert 0 == ret
         assert messages.REFRESH_CONTRACT_SUCCESS in capsys.readouterr()[0]
         assert [mock.call(cfg)] == request_updated_contract.call_args_list
+
+    @mock.patch("uaclient.cli.update_apt_and_motd_messages")
+    def test_refresh_motd_error(self, m_update_motd, getuid, FakeConfig):
+        """On failure in update_apt_and_motd_messages emit an error."""
+        m_update_motd.side_effect = exceptions.UserFacingError(
+            messages.REFRESH_MOTD_FAILURE
+        )
+
+        with pytest.raises(exceptions.UserFacingError) as excinfo:
+            action_refresh(mock.MagicMock(target="motd"), cfg=FakeConfig())
+
+        assert messages.REFRESH_MOTD_FAILURE == excinfo.value.msg
+
+    @mock.patch("uaclient.util.which")
+    @mock.patch("uaclient.cli.update_apt_and_motd_messages")
+    def test_refresh_motd_run_parts_error(
+        self, m_update_motd, m_which, getuid, FakeConfig
+    ):
+        m_which.return_value = False
+
+        with pytest.raises(exceptions.UserFacingError) as excinfo:
+            action_refresh(mock.MagicMock(target="motd"), cfg=FakeConfig())
+
+        assert (
+            messages.UPDATE_MOTD_NO_REQUIRED_CMD.format(cmd="run-parts")
+            == excinfo.value.msg
+        )
+
+    @mock.patch("uaclient.cli.refresh_motd")
+    @mock.patch("uaclient.cli.update_apt_and_motd_messages")
+    def test_refresh_motd_happy_path(
+        self, m_update_motd, m_refresh_motd, getuid, capsys, FakeConfig
+    ):
+        """On success from request_updates_contract root user can refresh."""
+        cfg = FakeConfig()
+        ret = action_refresh(mock.MagicMock(target="motd"), cfg=cfg)
+
+        assert 0 == ret
+        assert messages.REFRESH_MOTD_SUCCESS in capsys.readouterr()[0]
+        assert [mock.call(cfg)] == m_update_motd.call_args_list
+        assert [mock.call()] == m_refresh_motd.call_args_list
 
     @mock.patch("logging.exception")
     @mock.patch(

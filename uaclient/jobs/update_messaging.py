@@ -11,7 +11,7 @@ import logging
 import os
 from typing import List, Tuple
 
-from uaclient import config, defaults, entitlements, util
+from uaclient import config, defaults, entitlements, exceptions, messages, util
 from uaclient.entitlements.entitlement_status import ApplicationStatus
 from uaclient.messages import (
     ANNOUNCE_ESM_TMPL,
@@ -50,6 +50,11 @@ class ExternalMessage(enum.Enum):
     MOTD_ESM_SERVICE_STATUS = "motd-esm-service-status"
     ESM_ANNOUNCE = "motd-esm-announce"
     UBUNTU_NO_WARRANTY = "ubuntu-no-warranty"
+
+
+UPDATE_NOTIFIER_MOTD_SCRIPT = (
+    "/usr/lib/update-notifier/update-motd-updates-available"
+)
 
 
 def get_contract_expiry_status(
@@ -352,3 +357,21 @@ def update_apt_and_motd_messages(cfg: config.UAConfig) -> bool:
     # Now that we've setup/cleanedup templates render them with apt-hook
     util.subp(["/usr/lib/ubuntu-advantage/apt-esm-hook", "process-templates"])
     return True
+
+
+def refresh_motd():
+    # If update-notifier is present, we might as well update
+    # the package updates count related to MOTD
+    if os.path.exists(UPDATE_NOTIFIER_MOTD_SCRIPT):
+        util.subp([UPDATE_NOTIFIER_MOTD_SCRIPT, "--force"])
+
+    # run-parts should be delivered by the debianutils package, which
+    # should be included by default. We are just adding an extra check
+    # for possible corner-case situations
+    cmd = "run-parts"
+    if not util.which(cmd):
+        raise exceptions.UserFacingError(
+            messages.UPDATE_MOTD_NO_REQUIRED_CMD.format(cmd=cmd)
+        )
+
+    util.subp(["sudo", "run-parts", "/etc/update-motd.d/"])
