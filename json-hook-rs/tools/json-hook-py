@@ -1,0 +1,13 @@
+#!/bin/env python3
+import os
+import socket
+
+fd = int(os.getenv("APT_HOOK_SOCKET"))
+
+with socket.fromfd(fd, socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    print("socket connection open\n")
+    print(s.recv(1024))
+    s.send(b'{"jsonrpc":"2.0","id":0,"result":{"version":"0.1"}}\n\n')
+    print(s.recv(1024))
+
+print("socket closed\n")
