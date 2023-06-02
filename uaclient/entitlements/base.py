@@ -3,8 +3,19 @@ import copy
 import logging
 import os
 import sys
+from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import (
+    Any,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    Union,
+)
 
 from uaclient import config, contract, event_logger, messages, system, util
 from uaclient.api.u.pro.status.is_attached.v1 import _is_attached
@@ -37,7 +48,6 @@ class IncompatibleService:
 
 
 class UAEntitlement(metaclass=abc.ABCMeta):
-
     # Optional URL for top-level product service information
     help_doc_url = None  # type: str
 
@@ -455,6 +465,15 @@ class UAEntitlement(metaclass=abc.ABCMeta):
 
         return True, None
 
+    def _get_enable_steps(self, silent: bool = False) -> List["DeltaStep"]:
+        return [
+            DeltaStep(
+                id=f"{self.name}-enable",
+                callable=lambda: self.enable(silent=silent),
+                before=TARGET_UI,
+            )
+        ]
+
     @abc.abstractmethod
     def _perform_enable(self, silent: bool = False) -> bool:
         """
@@ -709,6 +728,15 @@ class UAEntitlement(metaclass=abc.ABCMeta):
         @return: True on success, False otherwise.
         """
         pass
+
+    def _get_disable_steps(self, silent: bool = False) -> List["DeltaStep"]:
+        return [
+            DeltaStep(
+                id=f"{self.name}-disable",
+                callable=lambda: self.disable(silent=silent),
+                before=TARGET_UI,
+            )
+        ]
 
     def _disable_dependent_services(
         self, silent: bool
@@ -1079,3 +1107,96 @@ class UAEntitlement(metaclass=abc.ABCMeta):
             return True
 
         return False
+
+    def collect_delta_steps(
+        self,
+        orig_access: Dict[str, Any],
+        deltas: Dict[str, Any],
+    ):
+        # breakpoint()
+        steps = []
+        if not deltas:
+            return steps  # We processed all deltas that needed processing
+
+        delta_entitlement = deltas.get("entitlement", {})
+        delta_directives = delta_entitlement.get("directives", {})
+        status_cache = self.cfg.read_cache("status-cache")
+
+        transition_to_unentitled = bool(delta_entitlement == util.DROPPED_KEY)
+        if not transition_to_unentitled:
+            if delta_entitlement:
+                contract.apply_contract_overrides(deltas)
+                delta_entitlement = deltas["entitlement"]
+            if orig_access and "entitled" in delta_entitlement:
+                transition_to_unentitled = delta_entitlement["entitled"] in (
+                    False,
+                    util.DROPPED_KEY,
+                )
+        if transition_to_unentitled:
+            if delta_directives and status_cache:
+                application_status = self._check_application_status_on_cache()
+            else:
+                application_status, _ = self.application_status()
+
+            if application_status != ApplicationStatus.DISABLED:
+                if self.can_disable():
+                    steps.extend(self._get_disable_steps())
+            return steps
+
+        resourceToken = orig_access.get("resourceToken")
+        if not resourceToken:
+            resourceToken = deltas.get("resourceToken")
+        delta_obligations = delta_entitlement.get("obligations", {})
+        enable_by_default = bool(
+            delta_obligations.get("enableByDefault") and resourceToken
+        )
+
+        if enable_by_default:
+            self.allow_beta = True
+
+        can_enable, _ = self.can_enable()
+        if can_enable and enable_by_default:
+            steps.extend(self._get_enable_steps())
+            return steps
+
+        return steps
+
+
+TARGET_UI = "TARGET_UI"  # pro status and the-like
+
+
+class DeltaStep(NamedTuple):
+    id: str
+    callable: Any
+    origin: str
+    after: str = ""
+    before: str = ""
+    # can be postponed / persited for async execution
+    postponable: bool = False
+
+
+def reduce_delta_steps(steps):
+    # TODO:
+    #  - Atm, this only defers and dedups apt-update ops
+    #    - Extend it to interleave sub enable/disable so that if
+    #      services A and B require (setup +) update + install, then
+    #      they can be reduced like:
+    #      setupA + setupB + update + installA + installB
+    #  - verify before/after constrains
+    result = []
+    tail = []
+    tail_map = defaultdict(list)
+    # breakpoint()
+    for step in steps:
+        if not step.id == "apt-update":
+            result.append(step)
+        elif step.before == TARGET_UI:
+            tail.append(step)
+            tail_map[step.id].append(step)
+            # TODO: merge after and before
+    # breakpoint()
+    if len(tail_map) > 2:
+        raise NotImplementedError
+    if len(tail_map) == 1:
+        result.append(tail[0])
+    return result

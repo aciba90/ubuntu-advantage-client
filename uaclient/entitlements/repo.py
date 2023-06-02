@@ -21,7 +21,6 @@ event = event_logger.get_event_logger()
 
 
 class RepoEntitlement(base.UAEntitlement):
-
     repo_list_file_tmpl = "/etc/apt/sources.list.d/ubuntu-{name}.list"
     repo_pref_file_tmpl = "/etc/apt/preferences.d/ubuntu-{name}"
 
@@ -69,6 +68,58 @@ class RepoEntitlement(base.UAEntitlement):
     @abc.abstractmethod
     def repo_key_file(self) -> str:
         pass
+
+    def _get_enable_steps(self, silent: bool = False):
+        steps = []
+
+        steps.append(
+            base.DeltaStep(
+                id=f"{self.name}-setup_apt_config",
+                callable=lambda: self.setup_apt_config(silent=silent),
+                origin=self.name,
+                before=base.TARGET_UI,
+            )
+        )
+
+        if self.supports_access_only and self.access_only:
+            packages_str = (
+                ": " + " ".join(self.packages)
+                if len(self.packages) > 0
+                else ""
+            )
+            event.info("Skipping installing packages{}".format(packages_str))
+            event.info(messages.ACCESS_ENABLED_TMPL.format(title=self.title))
+        else:
+            before = base.TARGET_UI
+            postponable = True
+            if self.packages:
+                before = f"{self.name}-install_packages"
+                postponable = False
+            steps.append(
+                base.DeltaStep(
+                    id="apt-update",
+                    origin=self.name,
+                    after=f"{self.name}-setup_apt_config",
+                    before=before,
+                    postponable=postponable,
+                    callable=apt.run_apt_update_command,
+                )
+            )
+
+            def _install_packages():
+                self.install_packages()
+                event.info(messages.ENABLED_TMPL.format(title=self.title))
+                self._check_for_reboot_msg(operation="install")
+
+            steps.append(
+                base.DeltaStep(
+                    id=f"{self.name}-install_packages",
+                    origin=self.name,
+                    callable=_install_packages,
+                    before=base.TARGET_UI,
+                )
+            )
+        return steps
 
     def _perform_enable(self, silent: bool = False) -> bool:
         """Enable specific entitlement.
@@ -392,10 +443,12 @@ class RepoEntitlement(base.UAEntitlement):
         apt.add_auth_apt_repo(
             repo_filename, repo_url, token, repo_suites, self.repo_key_file
         )
+        # TODO: return this as a DeltaStep
         # Run apt-update on any repo-entitlement enable because the machine
         # probably wants access to the repo that was just enabled.
         # Side-effect is that apt policy will now report the repo as accessible
         # which allows pro status to report correct info
+        """
         if not silent:
             event.info(messages.APT_UPDATING_LISTS)
         try:
@@ -403,6 +456,7 @@ class RepoEntitlement(base.UAEntitlement):
         except exceptions.UserFacingError:
             self.remove_apt_config(run_apt_update=False)
             raise
+        """
 
     def remove_apt_config(
         self, run_apt_update: bool = True, silent: bool = False

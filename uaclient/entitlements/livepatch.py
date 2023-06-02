@@ -12,7 +12,7 @@ from uaclient import (
     system,
     util,
 )
-from uaclient.entitlements.base import IncompatibleService, UAEntitlement
+from uaclient.entitlements.base import DeltaStep, IncompatibleService, UAEntitlement
 from uaclient.entitlements.entitlement_status import ApplicationStatus
 from uaclient.types import StaticAffordance
 
@@ -79,6 +79,22 @@ class LivepatchEntitlement(UAEntitlement):
             ),
         )
 
+    def _get_enable_steps(self):
+        enable_actions = []
+        if not system.which(snap.SNAP_CMD):
+            # Required to install snapd. If images come with a prebuilt apt cache,
+            # then this priority can be relaxed.
+            priority = f"BEFORE {self.name}-enable"
+            raise NotImplementedError
+            # TODO: split delta actions and define priority for apt update
+            enable_actions.append(
+                DeltaStep(
+                    id="apt-update",
+                    origin=self.name,
+                    callable=apt.run_apt_update_command,
+                ))
+        return enable_actions
+
     def _perform_enable(self, silent: bool = False) -> bool:
         """Enable specific entitlement.
 
@@ -86,15 +102,6 @@ class LivepatchEntitlement(UAEntitlement):
         """
         if not system.which(snap.SNAP_CMD):
             event.info("Installing snapd")
-            event.info(messages.APT_UPDATING_LISTS)
-            try:
-                apt.run_apt_update_command()
-            except exceptions.UserFacingError as e:
-                logging.debug(
-                    "Trying to install snapd."
-                    " Ignoring apt-get update failure: %s",
-                    str(e),
-                )
             try:
                 system.subp(
                     ["apt-get", "install", "--assume-yes", "snapd"],

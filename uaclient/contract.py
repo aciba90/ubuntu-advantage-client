@@ -15,6 +15,7 @@ from uaclient import (
 from uaclient.api.u.pro.status.enabled_services.v1 import _enabled_services
 from uaclient.config import UAConfig
 from uaclient.defaults import ATTACH_FAIL_DATE_FORMAT
+from uaclient.entitlements.base import reduce_delta_steps
 
 # Here we describe every endpoint from the ua-contracts
 # service that is used by this client implementation.
@@ -423,6 +424,55 @@ def process_entitlements_delta(
 
     # We need to sort our entitlements because some of them
     # depend on other service to be enable first.
+    delta_steps = []
+    if allow_enable:
+        for name in entitlements_enable_order(cfg):
+            try:
+                new_entitlement = new_entitlements[name]
+            except KeyError:
+                continue
+            # breakpoint()
+            new_actions = collect_delta_steps(
+                cfg=cfg,
+                orig_access=past_entitlements.get(name, {}),
+                new_access=new_entitlement,
+                series_overrides=series_overrides,
+            )
+            if new_actions:
+                delta_steps.extend(new_actions)
+
+    delta_steps = reduce_delta_steps(delta_steps)
+    # breakpoint()
+    # TODO: execute actions
+    failed_services = []  # type: List[str]
+    for delta_step in delta_steps:
+        try:
+            print("Executing delta_step: ", delta_step.id)
+            delta_step.callable()
+            # TODO: async steps
+            # if delta_step.postponable:
+            #     persist_to_job_or_something()
+        except exceptions.UserFacingError:
+            delta_error = True
+            failed_services.append(name)
+            with util.disable_log_to_console():
+                logging.error(
+                    "Failed to process contract delta for {name}:"
+                    " {delta}".format(name=delta_step.origin, delta="TODO")
+                )
+        except Exception:
+            unexpected_error = True
+            failed_services.append(delta_step.origin)
+            with util.disable_log_to_console():
+                logging.exception(
+                    "Unexpected error processing contract delta for {name}:"
+                    " {delta}".format(name=delta_step.origin, delta="TODO")
+                )
+
+
+    """
+    # We need to sort our entitlements because some of them
+    # depend on other service to be enable first.
     failed_services = []  # type: List[str]
     for name in entitlements_enable_order(cfg):
         try:
@@ -460,6 +510,7 @@ def process_entitlements_delta(
             # them, then we will mark that service as successfully enabled
             if service_enabled and deltas:
                 event.service_processed(name)
+    """
     event.services_failed(failed_services)
     if unexpected_error:
         raise exceptions.AttachFailureUnknownError(
@@ -474,7 +525,6 @@ def process_entitlements_delta(
                 for name in failed_services
             ]
         )
-
 
 def process_entitlement_delta(
     cfg: UAConfig,
@@ -535,6 +585,51 @@ def process_entitlement_delta(
             orig_access, deltas, allow_enable=allow_enable
         )
     return deltas, ret
+
+def collect_delta_steps(
+    cfg: UAConfig,
+    orig_access: Dict[str, Any],
+    new_access: Dict[str, Any],
+    series_overrides: bool = True,
+) -> Tuple[Dict, bool]:
+    # breakpoint()
+    from uaclient.entitlements import entitlement_factory
+    allow_enable = True
+
+    if series_overrides:
+        apply_contract_overrides(new_access)
+
+    deltas = util.get_dict_deltas(orig_access, new_access)
+    if not deltas:
+        return []
+
+    name = orig_access.get("entitlement", {}).get("type")
+    if not name:
+        name = deltas.get("entitlement", {}).get("type")
+    if not name:
+        msg = messages.INVALID_CONTRACT_DELTAS_SERVICE_TYPE.format(
+            orig=orig_access, new=new_access
+        )
+        raise exceptions.UserFacingError(msg=msg.msg, msg_code=msg.name)
+
+    variant = (
+        new_access.get("entitlements", {})
+        .get("obligations", {})
+        .get("use_selector", "")
+    )
+    try:
+        ent_cls = entitlement_factory(cfg=cfg, name=name, variant=variant)
+    except exceptions.EntitlementNotFoundError as exc:
+        logging.debug(
+            'Skipping entitlement deltas for "%s". No such class', name
+        )
+        raise exc
+
+    entitlement = ent_cls(cfg=cfg, assume_yes=allow_enable)
+    actions = entitlement.collect_delta_steps(
+        orig_access, deltas
+    )
+    return actions
 
 
 def _create_attach_forbidden_message(
